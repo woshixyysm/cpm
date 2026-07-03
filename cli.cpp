@@ -967,25 +967,46 @@ int main(int argc, char** argv) {
             // Create test.cpp that imports discovered module interfaces (fallbacks to package name if none found)
             auto testcpp = tmp / "test.cpp";
             std::ofstream t(testcpp);
-            // discover module names by scanning interface units
+            // discover module names by scanning interface units and headers
             std::set<std::string> moduleNames;
-            std::regex export_rx("export\\s+module\\s+([A-Za-z0-9_\\.]+)", std::regex_constants::icase);
+            // accept identifiers that may include :: and dots (e.g. cxx20::modules::examples)
+            std::regex export_rx("export\\s+module\\s+([A-Za-z0-9_:\\.]++)", std::regex_constants::icase);
+            std::regex module_rx("\\bmodule\\s+([A-Za-z0-9_:\\.]++)", std::regex_constants::icase);
             for (auto &ps : pkgSources) {
                 auto res = ModuleScanner::scanFile(ps);
                 for (auto &u : res.units) {
                     if (!u.logicalName.empty()) moduleNames.insert(u.logicalName);
                 }
-                // fallback: also search source text for 'export module' declarations
+                // fallback: also search source text for 'export module' or 'module' declarations
                 try {
                     std::ifstream in(ps);
-                    std::string line;
-                    while (std::getline(in, line)) {
-                        std::smatch m; if (std::regex_search(line, m, export_rx)) {
-                            if (m.size()>=2) moduleNames.insert(m[1].str());
-                        }
-                    }
+                    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    std::smatch m;
+                    if (std::regex_search(content, m, export_rx) && m.size()>=2) moduleNames.insert(m[1].str());
+                    if (std::regex_search(content, m, module_rx) && m.size()>=2) moduleNames.insert(m[1].str());
                 } catch(...) {}
             }
+
+            // also scan headers in include/ for module declarations
+            if (moduleNames.empty()) {
+                auto incdir = pkgPath / "include";
+                if (std::filesystem::exists(incdir) && std::filesystem::is_directory(incdir)) {
+                    for (auto &f : std::filesystem::recursive_directory_iterator(incdir)) {
+                        if (!f.is_regular_file()) continue;
+                        auto ext = f.path().extension().string();
+                        if (ext==".h" || ext==".hpp" || ext==".hh" || ext==".ixx" || ext==".cppm") {
+                            try {
+                                std::ifstream in(f.path());
+                                std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                                std::smatch m;
+                                if (std::regex_search(content, m, export_rx) && m.size()>=2) { moduleNames.insert(m[1].str()); continue; }
+                                if (std::regex_search(content, m, module_rx) && m.size()>=2) { moduleNames.insert(m[1].str()); continue; }
+                            } catch(...) {}
+                        }
+                    }
+                }
+            }
+
             // if still empty, look for files in modules/ directory and use filename stems
             if (moduleNames.empty()) {
                 auto moddir = pkgPath / "modules";
@@ -1000,8 +1021,35 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+
             if (moduleNames.empty()) {
-                t << "import " << name << ";\nint main(){}\n";
+                // no module names found — attempt to include a header instead of importing the package name
+                std::string pickedHeader;
+                auto incdir = pkgPath / "include";
+                if (std::filesystem::exists(incdir) && std::filesystem::is_directory(incdir)) {
+                    // prefer header matching package name
+                    std::vector<std::string> candidates = { name + ".hpp", name + ".h", name + ".hh" };
+                    for (auto &c : candidates) {
+                        auto p = incdir / c;
+                        if (std::filesystem::exists(p) && std::filesystem::is_regular_file(p)) { pickedHeader = p.string(); break; }
+                    }
+                    // otherwise pick the first header found
+                    if (pickedHeader.empty()) {
+                        for (auto &f : std::filesystem::recursive_directory_iterator(incdir)) {
+                            if (!f.is_regular_file()) continue;
+                            auto ext = f.path().extension().string();
+                            if (ext==".h" || ext==".hpp" || ext==".hh") { pickedHeader = f.path().string(); break; }
+                        }
+                    }
+                }
+
+                if (!pickedHeader.empty()) {
+                    t << "#include \"" << pickedHeader << "\"\n";
+                    t << "int main(){}\n";
+                } else {
+                    // final fallback: no modules or headers detected — produce minimal main to avoid assuming module name
+                    t << "int main(){}\n";
+                }
             } else {
                 for (auto &m : moduleNames) t << "import " << m << ";\n";
                 t << "int main(){}\n";
