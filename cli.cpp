@@ -1180,14 +1180,7 @@ int main(int argc, char** argv) {
                     } catch(...) { return false; }
                 };
 
-                if (comp.find("g++") != std::string::npos || comp.find("clang++") != std::string::npos) {
-                    if (supports_flag("-fmodules-ts")) {
-                        modflag = " -fmodules-ts -fmodules-cache-path=\"gcm.cache\"";
-                    } else {
-                        // compiler does not accept -fmodules-ts; avoid passing unknown argument
-                        modflag = "";
-                    }
-                } else modflag = "";
+                // create modules cache dir (only used if modules flags are applied)
                 auto gcm_cache = tmp / "gcm.cache";
                 std::filesystem::create_directories(gcm_cache);
 
@@ -1206,6 +1199,7 @@ int main(int argc, char** argv) {
                     try {
                         for (auto &p : std::filesystem::recursive_directory_iterator(depPath)) {
                             if (!p.is_regular_file()) continue;
+                            if (is_blacklisted(p.path())) continue;
                             auto e = p.path().extension().string();
                             if (e==".ixx" || e==".cppm" || e==".cpp" || e==".cc") {
                                 auto res = ModuleScanner::scanFile(p.path());
@@ -1213,6 +1207,20 @@ int main(int argc, char** argv) {
                             }
                         }
                     } catch(...) {}
+                }
+
+                // Determine whether to add module compilation flags: only if module sources exist and compiler supports the flag
+                if (!modSrcs.empty()) {
+                    if (comp.find("g++") != std::string::npos || comp.find("clang++") != std::string::npos) {
+                        if (supports_flag("-fmodules-ts")) {
+                            modflag = " -fmodules-ts -fmodules-cache-path=\"gcm.cache\"";
+                        } else {
+                            // don't add experimental/obsolete modules flags implicitly
+                            modflag = "";
+                        }
+                    }
+                } else {
+                    modflag = "";
                 }
 
                 auto oldcwd = std::filesystem::current_path();
