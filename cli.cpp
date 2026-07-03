@@ -1038,8 +1038,30 @@ int main(int argc, char** argv) {
             bool ok = false;
             for (auto &comp : compilers) {
                 std::string modflag;
+                // Detect whether the compiler accepts module-related flags before using them
+                auto supports_flag = [&](const std::string &flag) -> bool {
+                    try {
+                        auto test_src = tmp / "cpm_flag_test.cpp";
+                        std::ofstream ofs(test_src);
+                        ofs << "int main(){}\n";
+                        ofs.close();
+                        auto test_obj = tmp / "cpm_flag_test.o";
+                        std::string cmd = comp + " -std=c++20 " + flag + " -c \"" + test_src.string() + "\" -o \"" + test_obj.string() + "\"";
+                        int rc = std::system(cmd.c_str());
+                        std::error_code ec;
+                        std::filesystem::remove(test_src, ec);
+                        std::filesystem::remove(test_obj, ec);
+                        return rc == 0;
+                    } catch(...) { return false; }
+                };
+
                 if (comp.find("g++") != std::string::npos || comp.find("clang++") != std::string::npos) {
-                    modflag = " -fmodules-ts -fmodules-cache-path=\"gcm.cache\"";
+                    if (supports_flag("-fmodules-ts")) {
+                        modflag = " -fmodules-ts -fmodules-cache-path=\"gcm.cache\"";
+                    } else {
+                        // compiler does not accept -fmodules-ts; avoid passing unknown argument
+                        modflag = "";
+                    }
                 } else modflag = "";
                 auto gcm_cache = tmp / "gcm.cache";
                 std::filesystem::create_directories(gcm_cache);
