@@ -970,8 +970,8 @@ int main(int argc, char** argv) {
             // discover module names by scanning interface units and headers
             std::set<std::string> moduleNames;
             // accept identifiers that may include :: and dots (e.g. cxx20::modules::examples)
-            std::regex export_rx("export\\s+module\\s+([A-Za-z0-9_:\\.]++)", std::regex_constants::icase);
-            std::regex module_rx("\\bmodule\\s+([A-Za-z0-9_:\\.]++)", std::regex_constants::icase);
+            std::regex export_rx("export\\s+module\\s+([A-Za-z0-9_:\\.] +)", std::regex_constants::icase);
+            std::regex module_rx("\\bmodule\\s+([A-Za-z0-9_:\\.] +)", std::regex_constants::icase);
             for (auto &ps : pkgSources) {
                 auto res = ModuleScanner::scanFile(ps);
                 for (auto &u : res.units) {
