@@ -803,7 +803,7 @@ int main(int argc, char** argv) {
                     auto idx = load_index(indexFile); idx.push_back(e); save_index(indexFile, idx);
                     found = e;
                 }
-                auto archivePath = std::filesystem::path(found->archive.empty() ? found->path : found->archive);
+                auto archivePath = std::filesystem::path(found->archive.empty() ? found->path : std::filesystem::path(found->archive));
                 if (!std::filesystem::exists(archivePath)) { std::cerr << "archive missing: " << archivePath.string() << "\n"; return 1; }
                 // verify sha256
                 std::ifstream in(archivePath, std::ios::binary); std::ostringstream ss; ss << in.rdbuf(); auto sha = cppm::sha256_hex(ss.str());
