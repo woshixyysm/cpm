@@ -964,6 +964,54 @@ int main(int argc, char** argv) {
                 if (e==".ixx" || e==".cppm" || e==".cpp" || e==".cc" || e==".c") pkgSources.push_back(p.path());
             }
 
+            // If package metadata declares dependencies, collect their include dirs and sources so the test build can compile/link them
+            std::vector<std::filesystem::path> depIncludeDirs;
+            std::vector<std::filesystem::path> depSources;
+            std::vector<std::filesystem::path> depPaths;
+            try {
+                auto metaOpt = parse_toml_metadata(pkgPath / "cppmod.toml");
+                if (metaOpt) {
+                    for (auto &d : metaOpt->dependencies) {
+                        std::string depSpec = d;
+                        std::string depName;
+                        std::string depVer;
+                        auto atpos = depSpec.find('@');
+                        if (atpos!=std::string::npos) { depName = depSpec.substr(0, atpos); depVer = depSpec.substr(atpos+1); }
+                        else depName = depSpec;
+                        std::filesystem::path registryRoot = default_registry_root();
+                        std::filesystem::path depPath;
+                        if (!depVer.empty()) {
+                            auto candidate = registryRoot / (depName + "@" + depVer);
+                            if (std::filesystem::exists(candidate) && std::filesystem::is_directory(candidate)) depPath = candidate;
+                        } else {
+                            // find first matching directory named depName@*
+                            if (std::filesystem::exists(registryRoot) && std::filesystem::is_directory(registryRoot)) {
+                                for (auto &ent : std::filesystem::directory_iterator(registryRoot)) {
+                                    if (!ent.is_directory()) continue;
+                                    auto fn = ent.path().filename().string();
+                                    if (fn.rfind(depName + "@", 0) == 0) { depPath = ent.path(); break; }
+                                }
+                            }
+                        }
+                        if (!depPath.empty()) {
+                            // include public include dirs if present
+                            auto inc1 = depPath / "include";
+                            if (std::filesystem::exists(inc1) && std::filesystem::is_directory(inc1)) depIncludeDirs.push_back(inc1);
+                            depIncludeDirs.push_back(depPath);
+                            // remember dep path for module/interface discovery
+                            depPaths.push_back(depPath);
+                            // collect source files from dependency so they can be built/linked
+                            for (auto &p : std::filesystem::recursive_directory_iterator(depPath)) {
+                                if (!p.is_regular_file()) continue;
+                                auto e = p.path().extension().string();
+                                if (e==".cpp" || e==".cc" || e==".c") depSources.push_back(p.path());
+                            }
+                            
+                        }
+                    }
+                }
+            } catch(...) {}
+
             // Create test.cpp that imports discovered module interfaces (fallbacks to package name if none found)
             auto testcpp = tmp / "test.cpp";
             std::ofstream t(testcpp);
@@ -1055,16 +1103,21 @@ int main(int argc, char** argv) {
                 t << "int main(){}\n";
             }
             t.close();
-            if (!pkgSources.empty()) {
+            if (!pkgSources.empty() || !depSources.empty()) {
                 cml << "add_library(pkg_" << name << " STATIC\n";
                 for (auto &ps : pkgSources) cml << "    \"" << ps.generic_string() << "\"\n";
+                for (auto &ds : depSources) cml << "    \"" << ds.generic_string() << "\"\n";
                 cml << ")\n";
-                cml << "target_include_directories(pkg_" << name << " PUBLIC \"" << pkgPath.generic_string() << "\" \"" << (pkgPath / "include").generic_string() << "\")\n";
+                cml << "target_include_directories(pkg_" << name << " PUBLIC \"" << pkgPath.generic_string() << "\" \"" << (pkgPath / "include").generic_string() << "\"";
+                for (auto &d : depIncludeDirs) cml << " \"" << d.generic_string() << "\"";
+                cml << ")\n";
                 cml << "add_executable(testprog test.cpp)\n";
                 cml << "target_link_libraries(testprog PRIVATE pkg_" << name << ")\n";
             } else {
                 cml << "add_executable(testprog test.cpp)\n";
-                cml << "target_include_directories(testprog PRIVATE \"" << pkgPath.generic_string() << "\" \"" << (pkgPath / "include").generic_string() << "\")\n";
+                cml << "target_include_directories(testprog PRIVATE \"" << pkgPath.generic_string() << "\" \"" << (pkgPath / "include").generic_string() << "\"";
+                for (auto &d : depIncludeDirs) cml << " \"" << d.generic_string() << "\"";
+                cml << ")\n";
             }
             cml.close();
 
@@ -1117,12 +1170,25 @@ int main(int argc, char** argv) {
                 // compile module/interface files found in package
                 std::vector<std::filesystem::path> modSrcs;
                 for (auto &p : std::filesystem::recursive_directory_iterator(pkgPath)) {
-                                    if (!p.is_regular_file()) continue;
-                                    auto e = p.path().extension().string();
-                                    if (e==".ixx" || e==".cppm" || e==".cpp" || e==".cc" ) {
-                                        auto res = ModuleScanner::scanFile(p.path());
-                                        if (!res.units.empty()) modSrcs.push_back(p.path());
-                                    }
+                    if (!p.is_regular_file()) continue;
+                    auto e = p.path().extension().string();
+                    if (e==".ixx" || e==".cppm" || e==".cpp" || e==".cc") {
+                        auto res = ModuleScanner::scanFile(p.path());
+                        if (!res.units.empty()) modSrcs.push_back(p.path());
+                    }
+                }
+                // include module/interface units from dependency packages as well
+                for (auto &depPath : depPaths) {
+                    try {
+                        for (auto &p : std::filesystem::recursive_directory_iterator(depPath)) {
+                            if (!p.is_regular_file()) continue;
+                            auto e = p.path().extension().string();
+                            if (e==".ixx" || e==".cppm" || e==".cpp" || e==".cc") {
+                                auto res = ModuleScanner::scanFile(p.path());
+                                if (!res.units.empty()) modSrcs.push_back(p.path());
+                            }
+                        }
+                    } catch(...) {}
                 }
 
                 auto oldcwd = std::filesystem::current_path();
@@ -1131,21 +1197,38 @@ int main(int argc, char** argv) {
                 bool stageFail = false;
                 std::vector<std::string> objs;
                 for (auto &s : modSrcs) {
-                                    auto outobj = tmp / (s.filename().string() + ".o");
-                                    std::string cmdline = comp + " -std=c++20" + modflag + " -c \"" + s.string() + "\" -I\"" + pkgPath.string() + "\" -I\"" + (std::filesystem::path(pkgPath) / "include").string() + "\" -o \"" + outobj.string() + "\" ";
-                                    std::cout << "Running: " << cmdline << "\n";
-                                    int r = std::system(cmdline.c_str());
-                                    if (r != 0) { stageFail = true; break; }
-                                    objs.push_back(outobj.string());
+                    auto outobj = tmp / (s.filename().string() + ".o");
+                    std::string cmdline = comp + " -std=c++20" + modflag + " -c \"" + s.string() + "\" -I\"" + pkgPath.string() + "\" -I\"" + (std::filesystem::path(pkgPath) / "include").string() + "\" ";
+                    for (auto &d : depIncludeDirs) cmdline += " -I\"" + d.string() + "\" ";
+                    cmdline += " -o \"" + outobj.string() + "\" ";
+                    std::cout << "Running: " << cmdline << "\n";
+                    int r = std::system(cmdline.c_str());
+                    if (r != 0) { stageFail = true; break; }
+                    objs.push_back(outobj.string());
+                }
+
+                // compile non-module dependency sources so their symbols are available at link time
+                if (!stageFail) {
+                    for (auto &ds : depSources) {
+                        auto outobj = tmp / (ds.filename().string() + ".dep.o");
+                        std::string cmd = comp + " -std=c++20" + modflag + " -c \"" + ds.string() + "\" -I\"" + pkgPath.string() + "\" -I\"" + (std::filesystem::path(pkgPath) / "include").string() + "\" ";
+                        for (auto &d : depIncludeDirs) cmd += " -I\"" + d.string() + "\" ";
+                        cmd += " -o \"" + outobj.string() + "\" ";
+                        std::cout << "Running: " << cmd << "\n";
+                        int r = std::system(cmd.c_str());
+                        if (r != 0) { stageFail = true; break; }
+                        objs.push_back(outobj.string());
+                    }
                 }
 
                 if (!stageFail) {
-                                    std::string linkcmd = comp + " -std=c++20" + modflag + " \"" + testcpp.string() + "\" -I\"" + pkgPath.string() + "\" -I\"" + (std::filesystem::path(pkgPath) / "include").string() + "\" ";
-                                    for (auto &o : objs) linkcmd += " \"" + o + "\" ";
-                                    linkcmd += " -o \"" + (tmp / "testprog").string() + "\"";
-                                    std::cout << "Running: " << linkcmd << "\n";
-                                    int r2 = std::system(linkcmd.c_str());
-                                    if (r2 == 0) { ok = true; std::cout << "Test succeeded with compiler: " << comp << "\n"; }
+                    std::string linkcmd = comp + " -std=c++20" + modflag + " \"" + testcpp.string() + "\" -I\"" + pkgPath.string() + "\" -I\"" + (std::filesystem::path(pkgPath) / "include").string() + "\" ";
+                    for (auto &d : depIncludeDirs) linkcmd += " -I\"" + d.string() + "\" ";
+                    for (auto &o : objs) linkcmd += " \"" + o + "\" ";
+                    linkcmd += " -o \"" + (tmp / "testprog").string() + "\"";
+                    std::cout << "Running: " << linkcmd << "\n";
+                    int r2 = std::system(linkcmd.c_str());
+                    if (r2 == 0) { ok = true; std::cout << "Test succeeded with compiler: " << comp << "\n"; }
                 }
 
                 std::filesystem::current_path(oldcwd);
