@@ -961,7 +961,7 @@ int main(int argc, char** argv) {
             auto is_blacklisted = [&](const std::filesystem::path &p)->bool{
                 // blacklist common non-build directories
                 static const std::vector<std::string> bad = {"benchmark","bench","test","tests"};
-                for (auto &pc = p; !pc.empty(); pc = pc.parent_path()) {
+                for (std::filesystem::path pc = p; !pc.empty(); pc = pc.parent_path()) {
                     auto name = pc.filename().string();
                     std::string lower; lower.resize(name.size());
                     std::transform(name.begin(), name.end(), lower.begin(), [](unsigned char c){ return std::tolower(c); });
@@ -979,7 +979,7 @@ int main(int argc, char** argv) {
             // prefer source files under src/ if present (avoid including benchmarks/tests)
             std::vector<std::filesystem::path> preferredSources;
             for (auto &s: pkgSources) {
-                for (auto &pc = s.parent_path(); !pc.empty(); pc = pc.parent_path()) {
+                for (std::filesystem::path pc = s.parent_path(); !pc.empty(); pc = pc.parent_path()) {
                     if (pc.filename() == "src") { preferredSources.push_back(s); break; }
                     if (pc == pc.parent_path()) break;
                 }
