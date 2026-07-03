@@ -958,11 +958,33 @@ int main(int argc, char** argv) {
 
             // Collect package sources and create a library target so CMake will build module units
             std::vector<std::filesystem::path> pkgSources;
+            auto is_blacklisted = [&](const std::filesystem::path &p)->bool{
+                // blacklist common non-build directories
+                static const std::vector<std::string> bad = {"benchmark","bench","test","tests"};
+                for (auto &pc = p; !pc.empty(); pc = pc.parent_path()) {
+                    auto name = pc.filename().string();
+                    std::string lower; lower.resize(name.size());
+                    std::transform(name.begin(), name.end(), lower.begin(), [](unsigned char c){ return std::tolower(c); });
+                    for (auto &b: bad) if (lower == b) return true;
+                    if (pc == pc.parent_path()) break; // root
+                }
+                return false;
+            };
             for (auto &p : std::filesystem::recursive_directory_iterator(pkgPath)) {
                 if (!p.is_regular_file()) continue;
+                if (is_blacklisted(p.path())) continue;
                 auto e = p.path().extension().string();
                 if (e==".ixx" || e==".cppm" || e==".cpp" || e==".cc" || e==".c") pkgSources.push_back(p.path());
             }
+            // prefer source files under src/ if present (avoid including benchmarks/tests)
+            std::vector<std::filesystem::path> preferredSources;
+            for (auto &s: pkgSources) {
+                for (auto &pc = s.parent_path(); !pc.empty(); pc = pc.parent_path()) {
+                    if (pc.filename() == "src") { preferredSources.push_back(s); break; }
+                    if (pc == pc.parent_path()) break;
+                }
+            }
+            if (!preferredSources.empty()) pkgSources = preferredSources;
 
             // If package metadata declares dependencies, collect their include dirs and sources so the test build can compile/link them
             std::vector<std::filesystem::path> depIncludeDirs;
@@ -1000,13 +1022,14 @@ int main(int argc, char** argv) {
                             depIncludeDirs.push_back(depPath);
                             // remember dep path for module/interface discovery
                             depPaths.push_back(depPath);
-                            // collect source files from dependency so they can be built/linked
+                            // collect source files from dependency so they can be built/linked (skip benchmark/test dirs)
                             for (auto &p : std::filesystem::recursive_directory_iterator(depPath)) {
                                 if (!p.is_regular_file()) continue;
+                                if (is_blacklisted(p.path())) continue;
                                 auto e = p.path().extension().string();
                                 if (e==".cpp" || e==".cc" || e==".c") depSources.push_back(p.path());
                             }
-                            
+
                         }
                     }
                 }
@@ -1018,8 +1041,8 @@ int main(int argc, char** argv) {
             // discover module names by scanning interface units and headers
             std::set<std::string> moduleNames;
             // accept identifiers that may include :: and dots (e.g. cxx20::modules::examples)
-            std::regex export_rx("export\\s+module\\s+([A-Za-z0-9_:\\.] +)", std::regex_constants::icase);
-            std::regex module_rx("\\bmodule\\s+([A-Za-z0-9_:\\.] +)", std::regex_constants::icase);
+            std::regex export_rx("export\\s+module\\s+([A-Za-z0-9_:\\.]+)", std::regex_constants::icase);
+            std::regex module_rx("\\bmodule\\s+([A-Za-z0-9_:\\.]+)", std::regex_constants::icase);
             for (auto &ps : pkgSources) {
                 auto res = ModuleScanner::scanFile(ps);
                 for (auto &u : res.units) {
@@ -1041,6 +1064,7 @@ int main(int argc, char** argv) {
                 if (std::filesystem::exists(incdir) && std::filesystem::is_directory(incdir)) {
                     for (auto &f : std::filesystem::recursive_directory_iterator(incdir)) {
                         if (!f.is_regular_file()) continue;
+                        if (is_blacklisted(f.path())) continue;
                         auto ext = f.path().extension().string();
                         if (ext==".h" || ext==".hpp" || ext==".hh" || ext==".ixx" || ext==".cppm") {
                             try {
